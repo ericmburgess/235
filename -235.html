@@ -59,7 +59,7 @@ th{position:sticky; top:0; background:var(--panel); text-align:left;
 td{border-bottom:1px solid var(--edge); padding:1px 2px;}
 td.sym{color:var(--dim); text-align:right; width:52px;}
 #d-list td:nth-child(3){width:100%;}      /* WORD column absorbs slack... */
-#d-list td:last-child{text-align:right;}  /* ...so DESTROY sits at the right edge */
+#d-list td:last-child{text-align:right; white-space:nowrap;}  /* ...so ⚙ + DESTROY sit at the right edge, one line */
 td input{width:100%; border:1px solid transparent; background:transparent;}
 td input:focus{border:1px solid var(--line); background:#0c0800;}
 button.rm{padding:0 6px; border-color:#5a1200; color:#ff8866;}
@@ -116,6 +116,33 @@ button.rm{padding:0 6px; border-color:#5a1200; color:#ff8866;}
   padding:4px 12px; cursor:pointer; text-shadow:inherit;}
 .menu-controls label:hover,.menu-controls button:hover{background:#ececec; color:#0b0b0b; text-shadow:none;}
 #menu .stats{font-size:12px; color:#9a9a9a; margin-top:14px; border-top:1px solid #555; padding-top:8px;}
+/* ---- per-symbol NOTE + FORMATTING editor: a green-phosphor dialog, same 1973
+        terminal as the panes (scanlines, glow, all-caps) ---- */
+button.gr{padding:0 6px; border-color:var(--edge); color:var(--dim);}
+button.gr:hover{background:var(--line); color:var(--hi);}
+button.gr.on{color:var(--hi); border-color:var(--line);}   /* has a note or non-default formatting */
+#fmt-veil{position:fixed; inset:0; z-index:200; display:none;
+  align-items:center; justify-content:center; background:rgba(0,0,0,.7);}
+#fmt-veil.on{display:flex;}
+#fmt{position:relative; width:min(460px,92vw); max-height:85vh; overflow:auto;
+  background:repeating-linear-gradient(0deg,rgba(0,0,0,0) 0 2px,rgba(0,0,0,.16) 2px 3px),var(--panel);
+  border:1px solid var(--line); padding:16px 20px;
+  box-shadow:0 0 34px rgba(51,255,90,.18), inset 0 0 60px rgba(51,255,90,.04);}
+#fmt .head{margin:0 22px 4px 0;}
+#fmt-close{position:absolute; top:6px; right:12px; border:none; background:none;
+  font-size:24px; line-height:1; color:var(--dim); cursor:pointer; text-shadow:inherit;}
+#fmt-close:hover{color:var(--hi);}
+#fmt label.fmt-lbl,#fmt .fmt-row>span{display:block; color:var(--dim); margin:12px 0 4px;}
+#fmt-note{width:100%; font-family:inherit; font-size:13px; text-transform:uppercase;
+  background:#0c0800; color:var(--fg); border:1px solid var(--line); padding:4px 6px;
+  text-shadow:inherit; resize:vertical;}
+#fmt-note:focus{outline:1px solid var(--fg);}
+.fmt-row{margin-top:6px;}
+.fmt-seg{display:flex; flex-wrap:wrap; gap:4px;}
+.fmt-seg button{flex:1; min-width:64px;}
+button.tgl{min-width:70px;}
+.fmt-btns{display:flex; gap:8px; margin-top:20px;}
+.fmt-btns button{flex:1; padding:5px;}
 </style>
 </head>
 <body>
@@ -146,6 +173,26 @@ button.rm{padding:0 6px; border-color:#5a1200; color:#ff8866;}
       <button id="d-clear">Clear</button>
     </div>
     <p id="menu-stats" class="stats"></p>
+  </div>
+</div>
+
+<div id="fmt-veil">
+  <div id="fmt" role="dialog" aria-modal="true">
+    <button id="fmt-close" title="CLOSE">&times;</button>
+    <div id="fmt-title" class="head"></div>
+    <label class="fmt-lbl" for="fmt-note" id="fmt-note-lbl">NOTE</label>
+    <textarea id="fmt-note" rows="3"></textarea>
+    <div class="fmt-row"><span id="fmt-before-lbl">SPACE BEFORE</span>
+      <div class="fmt-seg" id="fmt-before">
+        <button data-v="0">NONE</button><button data-v="1">SPACE</button><button data-v="2">NEW LINE</button><button data-v="3">DBL LINE</button>
+      </div></div>
+    <div class="fmt-row"><span id="fmt-after-lbl">SPACE AFTER</span>
+      <div class="fmt-seg" id="fmt-after">
+        <button data-v="0">NONE</button><button data-v="1">SPACE</button><button data-v="2">NEW LINE</button><button data-v="3">DBL LINE</button>
+      </div></div>
+    <div class="fmt-row"><span id="fmt-brk-lbl">BREAK ON DOUBLE</span>
+      <button id="fmt-brk" class="tgl"></button></div>
+    <div class="fmt-btns"><button id="fmt-save">SAVE</button><button id="fmt-cancel">CANCEL</button></div>
   </div>
 </div>
 
@@ -226,14 +273,45 @@ const MIN_N = GAME[0].n, MAX_N = GAME[GAME.length - 1].n;
 // oracle build. The player build has it stripped out; detect and adapt.
 const HAS_ANSWERS = GAME.length > 0 && "w" in GAME[0];
 if (!HAS_ANSWERS) document.body.classList.add("no-answers");
-let DICT = new Map();          // sym(int) -> {gloss, note}
+let DICT = new Map();          // sym(int) -> {gloss, note, fmtB, fmtA, brk}
 let DICT_NAME = "(NONE)";
+let GB = {before: 1, after: 1};   // global default spacing (numbers / undefined symbols)
 let CUR = MIN_N, MVIEW = "gloss", FSCOPE = "in";
 const $ = id => document.getElementById(id);
 
 function glossSig(sigs){
   return sigs.map(s => DICT.has(s) ? DICT.get(s).gloss
       : (s >= 0 ? String(s) : "@UNDEF_" + Math.abs(s))).join(" ");
+}
+// Format-aware rendering for the TRANSLATION pane. Each symbol declares how much
+// whitespace it wants BEFORE and AFTER it (0 none, 1 space, 2 newline, 3 double
+// newline); between two adjacent tokens the stronger request wins. breakOnDouble
+// forces a newline when a symbol is immediately repeated. Numbers and undefined
+// symbols have no per-symbol setting, so they fall back to the global defaults.
+function tokOf(s){ return DICT.has(s) ? DICT.get(s).gloss
+    : (s >= 0 ? String(s) : "@UNDEF_" + Math.abs(s)); }
+// Literal digits hug their neighbours (no space on either side), so runs of
+// signals read as one number: "1 2 . 5" -> "12.5". Only negative symbols carry
+// per-symbol spacing; undefined symbols fall back to the global defaults.
+function beforeOf(s){ return s >= 0 ? 0 : (DICT.has(s) ? DICT.get(s).fmtB : GB.before); }
+function afterOf(s){ return s >= 0 ? 0 : (DICT.has(s) ? DICT.get(s).fmtA : GB.after); }
+function brkOf(s){ return DICT.has(s) ? !!DICT.get(s).brk : false; }
+function sepStr(l){ return l <= 0 ? "" : l === 1 ? " " : l === 2 ? "\n" : "\n\n"; }
+function formatSig(sigs){
+  let out = "";
+  for (let i = 0; i < sigs.length; i++){
+    const s = sigs[i];
+    if (i > 0){
+      const p = sigs[i - 1];
+      let lvl = Math.max(afterOf(p), beforeOf(s));
+      // break-on-double: the newline falls AFTER the second of two identical
+      // symbols -- the pair stays together and the break starts the next line.
+      if (i >= 2 && p === sigs[i - 2] && brkOf(p)) lvl = Math.max(lvl, 2);
+      out += sepStr(lvl);
+    }
+    out += tokOf(s);
+  }
+  return out;
 }
 function parseInts(str){ return (String(str).match(/-?\d+/g) || []).map(Number); }
 function eqArr(a, b){ return a.length === b.length && a.every((x, i) => x === b[i]); }
@@ -310,7 +388,7 @@ function renderMsgBody(){
   if (m.t) head += `   ${m.t}`;
   if (m.g) head += `  [${m.g}]`;
   $("m-head").textContent = head;
-  $("m-body").textContent = MVIEW === "raw" ? m.s.join(" ") : glossSig(m.s);
+  $("m-body").textContent = MVIEW === "raw" ? m.s.join(" ") : formatSig(m.s);
 }
 
 /* ---- DICTIONARY ---- */
@@ -320,10 +398,12 @@ function renderDict(){
   let h = `<table><thead><tr><th></th><th>${esc(glossSig([-42]))}</th><th>${esc(glossSig([-78]))}</th><th></th></tr></thead><tbody>`;
   for (const [sym, e] of rows){
     if (filt && !e.gloss.toUpperCase().includes(filt)) continue;   // substring match on the word only
+    const hasMeta = !!(e.note || e.fmtB !== 1 || e.fmtA !== 1 || e.brk);
     h += `<tr><td><button class="fs" data-sym="${sym}" title="FIND IN CONCORDANCE">»</button></td>`
       + `<td class="sym">${sym}</td>`
       + `<td><input class="g" data-sym="${sym}" value="${esc(e.gloss)}"></td>`
-      + `<td><button class="rm" data-sym="${sym}">${esc(glossSig([-88]))}</button></td></tr>`;
+      + `<td><button class="gr${hasMeta ? " on" : ""}" data-sym="${sym}" title="NOTE / FORMATTING">&#9881;</button> `
+      + `<button class="rm" data-sym="${sym}">${esc(glossSig([-88]))}</button></td></tr>`;
   }
   $("d-list").innerHTML = h + "</tbody></table>";
   $("d-list").querySelectorAll("input.g").forEach(inp => inp.oninput = () => {
@@ -341,47 +421,72 @@ function renderDict(){
     if (!toks.includes(b.dataset.sym)) toks.push(b.dataset.sym);   // add, don't duplicate
     box.value = toks.join(" "); doFind();
   });
+  $("d-list").querySelectorAll("button.gr").forEach(b => b.onclick = () => openFmt(+b.dataset.sym));
 }
 function onDictEdit(){ status(); renderMsgBody(); if ($("f-result").dataset.done) doFind(); }
 
 function dictToTSV(){
-  const out = ["# meta: id=1 before=1 after=1", "# columns: symbol\tgloss\tnote"];
-  for (const [s, e] of [...DICT.entries()].sort((a, b) => b[0] - a[0]))
-    out.push(s + "\t" + e.gloss + (e.note ? "\t" + e.note : ""));
+  const out = [`# meta: id=1 before=${GB.before} after=${GB.after}`,
+    "# columns: symbol\tgloss\tnote\tfmt\tfmtAfter\tbrk"];
+  for (const [s, e] of [...DICT.entries()].sort((a, b) => b[0] - a[0])){
+    const extra = (e.fmtB !== 1 || e.fmtA !== 1 || e.brk);   // only spell out fmt cols when non-default
+    let line = s + "\t" + e.gloss;
+    if (e.note || extra) line += "\t" + (e.note || "");
+    if (extra) line += "\t" + e.fmtB + "\t" + e.fmtA + "\t" + (e.brk ? 1 : 0);
+    out.push(line);
+  }
   return out.join("\n") + "\n";
 }
 function dictToSave(){
   const keys = [], values = [], dvals = [];
-  for (const [s, e] of DICT.entries()){
+  for (const [s, e] of [...DICT.entries()].sort((a, b) => b[0] - a[0])){   // always sorted on save
     keys.push(s); values.push(e.gloss);
     dvals.push({desc: e.note || "??? ADD NOTES HERE ???",
-      formatMode: 1, formatModeAfter: 1, breakOnDouble: false});
+      formatMode: e.fmtB, formatModeAfter: e.fmtA, breakOnDouble: !!e.brk});
   }
   return JSON.stringify({wordDict:{keys, values}, descDict:{keys:[...keys], values:dvals},
-    id: 1, beforeUserDefaultMode: 1, afterUserDefaultMode: 1}, null, 4) + "\n";
+    id: 1, beforeUserDefaultMode: GB.before, afterUserDefaultMode: GB.after}, null, 4) + "\n";
 }
 function loadDict(text, fname){
   const t = text.replace(/^﻿/, "").trimStart();
   const nd = new Map();
+  const gb = {before: 1, after: 1};
+  const clamp = v => { v = v | 0; return v < 0 ? 0 : v > 3 ? 3 : v; };
   if (t.startsWith("{")){
     const o = JSON.parse(text), wd = o.wordDict;
-    const notes = {};
+    if (Number.isFinite(o.beforeUserDefaultMode)) gb.before = clamp(o.beforeUserDefaultMode);
+    if (Number.isFinite(o.afterUserDefaultMode)) gb.after = clamp(o.afterUserDefaultMode);
+    const desc = {};
     if (o.descDict) (o.descDict.keys || []).forEach((k, i) => {
-      notes[k] = (o.descDict.values[i] || {}).desc; });
+      desc[k] = o.descDict.values[i] || {}; });
     for (let i = 0; i < wd.keys.length; i++){
-      let note = notes[wd.keys[i]] || "";
+      const k = wd.keys[i], d = desc[k] || {};
+      let note = d.desc || "";
       if (note === "??? ADD NOTES HERE ???") note = "";
-      nd.set(wd.keys[i], {gloss: String(wd.values[i]).toUpperCase(), note});
+      nd.set(k, {gloss: String(wd.values[i]).toUpperCase(), note,
+        fmtB: Number.isFinite(d.formatMode) ? clamp(d.formatMode) : gb.before,
+        fmtA: Number.isFinite(d.formatModeAfter) ? clamp(d.formatModeAfter) : gb.after,
+        brk: !!d.breakOnDouble});
     }
   } else {
     for (const line of text.split(/\r?\n/)){
-      if (!line.trim() || line.startsWith("#")) continue;
+      if (!line.trim()) continue;
+      if (line.startsWith("#")){       // read global defaults from the meta comment
+        const mb = /before=(\d+)/.exec(line), ma = /\bafter=(\d+)/.exec(line);
+        if (mb) gb.before = clamp(+mb[1]);
+        if (ma) gb.after = clamp(+ma[1]);
+        continue;
+      }
       const c = line.split("\t"), s = parseInt(c[0], 10);
       if (isNaN(s)) continue;
-      nd.set(s, {gloss: (c[1] || "").toUpperCase(), note: c[2] || ""});
+      const has = i => c[i] !== undefined && c[i] !== "";
+      nd.set(s, {gloss: (c[1] || "").toUpperCase(), note: c[2] || "",
+        fmtB: has(3) ? clamp(+c[3]) : gb.before,
+        fmtA: has(4) ? clamp(+c[4]) : gb.after,
+        brk: has(5) ? (c[5].trim() === "1" || /^true$/i.test(c[5].trim())) : false});
     }
   }
-  DICT = nd;
+  DICT = nd; GB = gb;
   DICT_NAME = (fname || "LOADED").replace(/\.(tsv|save|json)$/i, "").toUpperCase();
   status(); renderDict(); renderMsgBody(); if ($("f-result").dataset.done) doFind();
 }
@@ -481,13 +586,16 @@ $("d-add").onclick = () => {
   if (isNaN(s)){ alert("SYMBOL MUST BE AN INTEGER"); return; }
   const g = $("d-gloss").value.toUpperCase().trim();
   const old = DICT.get(s);
-  DICT.set(s, {gloss: g, note: old ? old.note : ""});
+  DICT.set(s, {gloss: g, note: old ? old.note : "",
+    fmtB: old ? old.fmtB : GB.before, fmtA: old ? old.fmtA : GB.after,
+    brk: old ? old.brk : false});
   $("d-sym").value = ""; $("d-gloss").value = "";
   status(); renderDict(); renderMsgBody();
 };
 $("d-gloss").onkeydown = e => { if (e.key === "Enter") $("d-add").onclick(); };
 $("d-clear").onclick = () => { if (confirm("CLEAR THE DICTIONARY?")){
-  DICT = new Map(); DICT_NAME = "(NONE)"; status(); renderDict(); renderMsgBody(); } };
+  DICT = new Map(); DICT_NAME = "(NONE)"; GB = {before: 1, after: 1};
+  status(); renderDict(); renderMsgBody(); } };
 $("d-tsv").onclick = () => download((DICT_NAME || "dict").toLowerCase() + ".tsv", dictToTSV());
 $("d-save").onclick = () => download((DICT_NAME || "dict").toLowerCase() + ".save", dictToSave());
 $("d-file").onchange = e => {
@@ -528,7 +636,42 @@ document.addEventListener("drop", e => {
 $("menu-btn").onclick = () => $("menu-veil").classList.add("on");
 $("menu-close").onclick = () => $("menu-veil").classList.remove("on");
 $("menu-veil").onclick = e => { if (e.target === $("menu-veil")) $("menu-veil").classList.remove("on"); };
-document.addEventListener("keydown", e => { if (e.key === "Escape") $("menu-veil").classList.remove("on"); });
+document.addEventListener("keydown", e => { if (e.key === "Escape"){
+  $("menu-veil").classList.remove("on"); closeFmt(); } });
+
+/* ---- per-symbol NOTE + FORMATTING modal (opened by the gear on a dict row) ---- */
+let FMT_SYM = null;
+function setSeg(id, v){ document.querySelectorAll(`#${id} button`).forEach(b =>
+  b.classList.toggle("active", +b.dataset.v === (v | 0))); }
+function getSeg(id){ const a = document.querySelector(`#${id} button.active`);
+  return a ? +a.dataset.v : 1; }
+function setBrk(on){ const b = $("fmt-brk");
+  b.classList.toggle("active", !!on); b.textContent = on ? "YES" : "NO"; }
+function openFmt(sym){
+  const e = DICT.get(sym); if (!e) return;
+  FMT_SYM = sym;
+  $("fmt-title").textContent = glossSig([-42]) + " " + sym + (e.gloss ? "   " + e.gloss : "");   // SYMBOL n GLOSS
+  $("fmt-note").value = e.note || "";
+  setSeg("fmt-before", e.fmtB); setSeg("fmt-after", e.fmtA); setBrk(e.brk);
+  $("fmt-veil").classList.add("on");
+}
+function closeFmt(){ $("fmt-veil").classList.remove("on"); FMT_SYM = null; }
+document.querySelectorAll("#fmt-before button, #fmt-after button").forEach(b => b.onclick = () => {
+  const seg = b.parentElement.id;
+  document.querySelectorAll(`#${seg} button`).forEach(x => x.classList.remove("active"));
+  b.classList.add("active");
+});
+$("fmt-brk").onclick = () => setBrk(!$("fmt-brk").classList.contains("active"));
+$("fmt-save").onclick = () => {
+  const e = DICT.get(FMT_SYM);
+  if (e){ e.note = $("fmt-note").value.trim();
+    e.fmtB = getSeg("fmt-before"); e.fmtA = getSeg("fmt-after");
+    e.brk = $("fmt-brk").classList.contains("active"); }
+  closeFmt(); status(); renderDict(); renderMsgBody();
+};
+$("fmt-cancel").onclick = closeFmt;
+$("fmt-close").onclick = closeFmt;
+$("fmt-veil").onclick = e => { if (e.target === $("fmt-veil")) closeFmt(); };
 
 /* ---- init ---- */
 status(); renderDict(); loadMsg(MIN_N);

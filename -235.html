@@ -143,6 +143,16 @@ button.gr.on{color:var(--hi); border-color:var(--line);}   /* has a note or non-
 button.tgl{min-width:70px;}
 .fmt-btns{display:flex; gap:8px; margin-top:20px;}
 .fmt-btns button{flex:1; padding:5px;}
+/* clipboard export/import buttons in the top bar (green, in-character) */
+.barbtn{display:inline-flex; align-items:center; gap:5px; white-space:nowrap;}
+.barbtn svg{height:16px; width:auto; display:block; flex:none;}
+.barbtn.flash{background:var(--fg); color:#120c00; text-shadow:none;}   /* brief confirm after copy / paste */
+.barbtn:disabled{opacity:.4; cursor:not-allowed;}
+.barbtn:disabled:hover{background:#0c0800; color:var(--fg);}           /* stay inert while disabled */
+/* out-of-character save-state readout (white, like the Menu), left of the clipboard buttons */
+#unsaved{font-family:Helvetica,Arial,sans-serif; text-transform:uppercase; letter-spacing:1px;
+  font-size:12px; color:#8f8f8f; text-shadow:none; white-space:nowrap;}
+#unsaved.dirty{color:#f4f4f4; font-weight:bold;}                        /* something to save */
 </style>
 </head>
 <body>
@@ -152,6 +162,11 @@ button.tgl{min-width:70px;}
 <div id="bar">
   <span class="logo" id="logo">&#9678; @UNDEF_45 @UNDEF_44 @UNDEF_110 @UNDEF_237 @UNDEF_235</span>
   <span class="spacer"></span>
+  <span id="unsaved"></span>
+  <button id="d-copy" class="barbtn" title="COPY DICTIONARY (.SAVE) TO CLIPBOARD">
+    <svg viewBox="0 0 32 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 13h9"/><path d="M7 9l4 4-4 4"/><rect x="16" y="2" width="8" height="4" rx="1"/><path d="M24 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H14a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></button>
+  <button id="d-paste" class="barbtn" title="LOAD DICTIONARY (.SAVE) FROM CLIPBOARD">
+    <svg viewBox="0 0 32 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M11 13H2"/><path d="M6 9l-4 4 4 4"/><rect x="16" y="2" width="8" height="4" rx="1"/><path d="M24 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H14a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"/></svg></button>
   <button id="menu-btn">Menu</button>
 </div>
 
@@ -160,7 +175,7 @@ button.tgl{min-width:70px;}
     <button id="menu-close" title="Close">&times;</button>
     <h2>Hmmmm.</h2>
     <p class="stub">I didn't like some of my guesses so I tried some different ones.
-    I made a final update so you can try your own.  - Bautista</p>
+    I made a final update so we can do this more efficiently.  - Bautista</p>
     <h3>Load a dictionary</h3>
     <p>Drag a dictionary file anywhere onto the window, or use <b>Load…</b> below.
       Either format works: a plain <code>.tsv</code> (symbol&nbsp;/&nbsp;word) or a game
@@ -274,6 +289,7 @@ const MIN_N = GAME[0].n, MAX_N = GAME[GAME.length - 1].n;
 const HAS_ANSWERS = GAME.length > 0 && "w" in GAME[0];
 if (!HAS_ANSWERS) document.body.classList.add("no-answers");
 let DICT = new Map();          // sym(int) -> {gloss, note, fmtB, fmtA, brk}
+let DIRTY = new Set();         // symbols changed since the last load / save (the "unsaved" count)
 let DICT_NAME = "(NONE)";
 let GB = {before: 1, after: 1};   // global default spacing (numbers / undefined symbols)
 let CUR = MIN_N, MVIEW = "gloss", FSCOPE = "in";
@@ -333,7 +349,7 @@ function updateLabels(){
   // The UI chrome is written in the loaded dictionary's own language.
   const g = seq => glossSig(seq);
   // MESSAGE pane
-  $("ph-msg").textContent = g([-14, -42, -3, -42, -3, -25, -15, -86, -14, -78, -3, -78, -3, -25, -15, -38]); // ( SYMBOL , SYMBOL , ... ) THE ( WORD , WORD , ... ) MAKE
+  $("ph-msg").textContent = g([-44, -43, -40, -130, -43, -41]);              // MESSENGER MESSAGE -FROM HUMAN MESSAGE -TO
   $("lbl-goto").textContent = g([-43]);                                      // MESSAGE
   $("m-go").textContent = g([-163]);                                         // SEE
   $("m-prev").textContent = g([-118]);                                       // PREV
@@ -345,7 +361,7 @@ function updateLabels(){
     ? g([-154, -130, -43, -163, -29])   // GOOD HUMAN MESSAGE SEE NOT  (hide)
     : g([-154, -130, -43, -163]);       // GOOD HUMAN MESSAGE SEE      (show)
   // DICTIONARY pane
-  $("ph-dict").textContent = g([-110, -14, -42, -3, -78, -15]);              // ALL ( SYMBOL , WORD )
+  $("ph-dict").textContent = g([-110, -14, -44, -42, -3, -130, -42, -15, -237]); // ALL ( MESSENGER SYMBOL , HUMAN SYMBOL ) KNOWLEDGE
   $("lbl-sym").textContent = g([-42]);                                       // SYMBOL
   $("lbl-word").textContent = g([-78]);                                      // WORD
   $("d-filter").placeholder = g([-78, -158]);                                // WORD PART
@@ -368,6 +384,11 @@ function status(){
   $("menu-stats").textContent =
     `Dictionary: ${DICT_NAME} · ${DICT.size} symbols     |     Corpus: messages ${MIN_N}-${MAX_N}`;
   $("menu-btn").classList.toggle("pulse", DICT.size === 0);   // breathe until a dictionary is loaded
+  $("d-copy").disabled = DICT.size === 0;                     // nothing to export until a dictionary is loaded
+  // Save-state readout: "UNSAVED" has no alien symbol so it stays literal; the
+  // rest is the dictionary's own "SYMBOL QTY =" (-42 -23 -4), then the count.
+  $("unsaved").textContent = "UNSAVED " + glossSig([-42, -23, -4]) + " " + DIRTY.size;
+  $("unsaved").classList.toggle("dirty", DIRTY.size > 0);
   updateTitle();
   updateLabels();
 }
@@ -408,12 +429,12 @@ function renderDict(){
   $("d-list").innerHTML = h + "</tbody></table>";
   $("d-list").querySelectorAll("input.g").forEach(inp => inp.oninput = () => {
     inp.value = inp.value.toUpperCase();
-    DICT.get(+inp.dataset.sym).gloss = inp.value; onDictEdit();
+    const s = +inp.dataset.sym; DICT.get(s).gloss = inp.value; DIRTY.add(s); onDictEdit();
   });
   $("d-list").querySelectorAll("button.rm").forEach(b => b.onclick = () => {
     const s = +b.dataset.sym, e = DICT.get(s);
     if (!confirm(`DELETE SYMBOL ${s}` + (e && e.gloss ? ` (${e.gloss})` : "") + "?")) return;
-    DICT.delete(s); status(); renderDict(); renderMsgBody();
+    DICT.delete(s); DIRTY.add(s); status(); renderDict(); renderMsgBody();
   });
   $("d-list").querySelectorAll("button.fs").forEach(b => b.onclick = () => {
     const box = $("f-term");
@@ -486,7 +507,7 @@ function loadDict(text, fname){
         brk: has(5) ? (c[5].trim() === "1" || /^true$/i.test(c[5].trim())) : false});
     }
   }
-  DICT = nd; GB = gb;
+  DICT = nd; GB = gb; DIRTY = new Set();   // a freshly loaded dictionary is "saved"
   DICT_NAME = (fname || "LOADED").replace(/\.(tsv|save|json)$/i, "").toUpperCase();
   status(); renderDict(); renderMsgBody(); if ($("f-result").dataset.done) doFind();
 }
@@ -589,21 +610,67 @@ $("d-add").onclick = () => {
   DICT.set(s, {gloss: g, note: old ? old.note : "",
     fmtB: old ? old.fmtB : GB.before, fmtA: old ? old.fmtA : GB.after,
     brk: old ? old.brk : false});
+  DIRTY.add(s);
   $("d-sym").value = ""; $("d-gloss").value = "";
   status(); renderDict(); renderMsgBody();
 };
 $("d-gloss").onkeydown = e => { if (e.key === "Enter") $("d-add").onclick(); };
 $("d-clear").onclick = () => { if (confirm("CLEAR THE DICTIONARY?")){
-  DICT = new Map(); DICT_NAME = "(NONE)"; GB = {before: 1, after: 1};
+  DICT = new Map(); DICT_NAME = "(NONE)"; GB = {before: 1, after: 1}; DIRTY = new Set();
   status(); renderDict(); renderMsgBody(); } };
-$("d-tsv").onclick = () => download((DICT_NAME || "dict").toLowerCase() + ".tsv", dictToTSV());
-$("d-save").onclick = () => download((DICT_NAME || "dict").toLowerCase() + ".save", dictToSave());
+$("d-tsv").onclick = () => { download((DICT_NAME || "dict").toLowerCase() + ".tsv", dictToTSV());
+  DIRTY.clear(); status(); };
+$("d-save").onclick = () => { download((DICT_NAME || "dict").toLowerCase() + ".save", dictToSave());
+  DIRTY.clear(); status(); };
 $("d-file").onchange = e => {
   const f = e.target.files[0]; if (!f) return;
   const r = new FileReader();
   r.onload = () => { try { loadDict(r.result, f.name); } catch (x){ alert("BAD FILE: " + x.message); } };
   r.readAsText(f);
 };
+
+/* ---- clipboard export/import (top-bar ⧉ -TO / ⧉ -FROM) ---- */
+function flashBtn(id){ const b = $(id); b.classList.add("flash");
+  setTimeout(() => b.classList.remove("flash"), 700); }
+function legacyCopy(text){   // fallback when navigator.clipboard is absent (e.g. file://)
+  const ta = document.createElement("textarea");
+  ta.value = text; ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+  document.body.appendChild(ta); ta.focus(); ta.select();
+  let ok = false; try { ok = document.execCommand("copy"); } catch (_){}
+  document.body.removeChild(ta); return ok;
+}
+async function copyDict(){    // -TO: dictionary -> clipboard, as .save
+  if (!DICT.size) return;     // export is disabled with no dictionary; guard anyway
+  const text = dictToSave();
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) await navigator.clipboard.writeText(text);
+    else if (!legacyCopy(text)) throw new Error("CLIPBOARD UNAVAILABLE");
+    DIRTY.clear(); status();   // exported -> nothing unsaved
+    flashBtn("d-copy");
+  } catch (x){ alert("COPY FAILED: " + x.message); }
+}
+async function pasteDict(){   // -FROM: clipboard -> dictionary (.save or .tsv, auto-detected)
+  let text = "";
+  try {
+    if (navigator.clipboard && navigator.clipboard.readText) text = await navigator.clipboard.readText();
+    else text = prompt("PASTE DICTIONARY (.SAVE OR TSV):") || "";
+  } catch (_){ text = prompt("PASTE DICTIONARY (.SAVE OR TSV):") || ""; }
+  if (!text.trim()) return;
+  try { loadDict(text, "CLIPBOARD"); flashBtn("d-paste"); }
+  catch (x){ alert("BAD DICTIONARY: " + x.message); }
+}
+$("d-copy").onclick = copyDict;
+$("d-paste").onclick = pasteDict;
+
+/* click / tab into a populated field -> select its contents (delegated, so it
+   also covers the dictionary rows' inputs, which are created on the fly) */
+document.addEventListener("focusin", e => {
+  const el = e.target;
+  if (!el || typeof el.select !== "function") return;
+  const texty = el.tagName === "TEXTAREA" ||
+    (el.tagName === "INPUT" && /^(text|number|search|tel|url|email|password)$/.test(el.type || "text"));
+  if (texty && el.value) setTimeout(() => { try { el.select(); } catch (_){} }, 0);   // defer past caret placement
+});
 
 $("f-go").onclick = doFind;
 $("f-clear").onclick = () => {
@@ -666,7 +733,7 @@ $("fmt-save").onclick = () => {
   const e = DICT.get(FMT_SYM);
   if (e){ e.note = $("fmt-note").value.trim();
     e.fmtB = getSeg("fmt-before"); e.fmtA = getSeg("fmt-after");
-    e.brk = $("fmt-brk").classList.contains("active"); }
+    e.brk = $("fmt-brk").classList.contains("active"); DIRTY.add(FMT_SYM); }
   closeFmt(); status(); renderDict(); renderMsgBody();
 };
 $("fmt-cancel").onclick = closeFmt;

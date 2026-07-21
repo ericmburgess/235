@@ -238,6 +238,7 @@ button.tgl{min-width:70px;}
     <div class="pc">
       <div class="row">
         <input id="d-filter" placeholder="FILTER" style="flex:1;">
+        <button id="d-filter-clear" title="CLEAR FILTER">X</button>
       </div>
       <div class="row">
         <span id="lbl-sym">SYM</span><input id="d-sym" class="num">
@@ -438,9 +439,8 @@ function renderDict(){
   });
   $("d-list").querySelectorAll("button.fs").forEach(b => b.onclick = () => {
     const box = $("f-term");
-    const toks = box.value.trim().split(/\s+/).filter(Boolean);
-    if (!toks.includes(b.dataset.sym)) toks.push(b.dataset.sym);   // add, don't duplicate
-    box.value = toks.join(" "); doFind();
+    box.value = (box.value.trim() + " " + b.dataset.sym).trim();   // append; duplicates allowed (for phrases)
+    doFind();
   });
   $("d-list").querySelectorAll("button.gr").forEach(b => b.onclick = () => openFmt(+b.dataset.sym));
 }
@@ -524,10 +524,22 @@ function doFind(){
   const res = $("f-result"); res.dataset.done = "1";
   const toks = $("f-term").value.trim().split(/\s+/).filter(Boolean);
   if (!toks.length){ res.innerHTML = '<div class="dim">ENTER ONE OR MORE SYMBOLS / WORDS.</div>'; return; }
-  // Each whitespace-separated token is one term (an int, or a word -> its symbols).
-  // A message matches only if it mentions EVERY term (logical AND).
-  const terms = toks.map(t => ({ raw: t, syms: new Set(resolveTerm(t)) }));
-  const matches = seqs => {
+  // Each whitespace-separated token is one ORDERED term (an int, or a word -> its
+  // symbols). Duplicates are kept -- an exact phrase may repeat a symbol.
+  const terms = toks.map(t => {
+    const syms = new Set(resolveTerm(t));
+    const sym = syms.size === 1 ? [...syms][0] : null;                 // the single symbol, when unambiguous
+    const gloss = (sym != null && DICT.get(sym)) ? DICT.get(sym).gloss : "";
+    return { raw: t, syms, sym, gloss };
+  });
+  const L = terms.length;
+  // Which sequences to search, per the SIGNALS / REPLIES / BOTH scope.
+  const seqsOf = m =>
+    FSCOPE === "out"  ? [m.w || [], ...(m.a || [])] :
+    FSCOPE === "both" ? [m.s, m.w || [], ...(m.a || [])] :
+                        [m.s];
+  // ALL SYMBOLS: every term appears somewhere in the message (logical AND).
+  const countAll = seqs => {
     let total = 0;
     for (const t of terms){
       let hit = false;
@@ -536,33 +548,44 @@ function doFind(){
     }
     return total;
   };
-  const collect = seqsOf => {
+  // EXACT PHRASE: the terms appear contiguously, in order, within one sequence.
+  const countPhrase = seqs => {
+    let total = 0;
+    for (const seq of seqs)
+      for (let j = 0; j + L <= seq.length; j++){
+        let ok = true;
+        for (let i = 0; i < L; i++) if (!terms[i].syms.has(seq[j + i])){ ok = false; break; }
+        if (ok) total++;           // count every occurrence of the phrase
+      }
+    return total;
+  };
+  const collect = counter => {
     const hits = [];
-    for (const m of GAME){ const c = matches(seqsOf(m)); if (c) hits.push([m.n, c]); }
+    for (const m of GAME){ const c = counter(seqsOf(m)); if (c) hits.push([m.n, c]); }
     return hits;
   };
-  // Counts rendered in the loaded dictionary's own language:
-  //   -43 -23 -4 N  = "MESSAGE QTY = N"   (messages found)
-  //   -42 -23 -4 N  = "SYMBOL QTY = N"    (symbol occurrences)
-  const gc = seq => esc(glossSig(seq));
-  // In BOTH mode each section is tagged in the dictionary's language:
-  //   -129 -43 = "OCTOPOD MESSAGE" (incoming signals), -130 -43 = "HUMAN MESSAGE" (replies).
-  const section = (tagSeq, hits) => {
+  const gc = seq => esc(glossSig(seq));   // "-43 -23 -4" -> "MESSAGE QTY =", etc.
+  // Section headers spell out the search literally, each symbol as  sym/GLOSS :
+  //   ALL:    -100/IS AND -29/NOT AND -117/LIKE INSIDE MESSAGE
+  //   PHRASE: (-100, -29, -117)/"IS NOT LIKE" INSIDE MESSAGE
+  const pieceAll = t => t.sym != null ? (t.gloss ? `${t.sym}/${t.gloss}` : `${t.sym}`) : t.raw;
+  const allLabel = terms.map(pieceAll).join(" AND ") + " INSIDE MESSAGE";
+  const phraseSyms = terms.map(t => t.sym != null ? t.sym : t.raw).join(", ");
+  const phraseGloss = terms.map(t => t.sym != null ? tokOf(t.sym) : t.raw).join(" ");
+  const phraseLabel = `(${phraseSyms})/"${phraseGloss}" INSIDE MESSAGE`;
+  const section = (label, hits) => {
     const occ = hits.reduce((a, [, c]) => a + c, 0);
-    const counts = `${gc([-43, -23, -4])} ${hits.length}   ${gc([-42, -23, -4])} ${occ}`;
-    const head = FSCOPE === "both" ? `<span class="dim">${gc(tagSeq)}</span>  ${counts}` : counts;
-    let s = `<div class="fhdr">${head}</div><div class="chips">`;
+    // MESSAGE QTY always; SYMBOL QTY (occurrence total) only for a single-symbol search.
+    const counts = `${gc([-43, -23, -4])} ${hits.length}`
+      + (L === 1 ? `   ${gc([-42, -23, -4])} ${occ}` : "");
+    let s = `<div class="fhdr">${esc(label)}</div>`
+      + `<div class="dim">${counts}</div>`
+      + `<div class="chips">`;
     for (const [n, c] of hits) s += `<span class="chip" data-n="${n}">${n}${c > 1 ? "·" + c : ""}</span>`;
     return s + "</div>";
   };
-  const termLabel = t => t.syms.size
-    ? [...t.syms].map(s => { const g = DICT.get(s) && DICT.get(s).gloss;
-        return g ? `${s}   "${esc(g)}"` : `${s}`; }).join(" / ")   // 3 spaces: glosses may hold punctuation
-    : `${esc(t.raw)} (?)`;
-  let h = `<div class="dim">SYMBOL${terms.length > 1 ? "S" : ""} ${terms.map(termLabel).join("  AND  ")}</div>`;
-  if (FSCOPE === "in" || FSCOPE === "both") h += section([-129, -43], collect(m => [m.s]));
-  if (HAS_ANSWERS && (FSCOPE === "out" || FSCOPE === "both"))
-    h += section([-130, -43], collect(m => [m.w || [], ...(m.a || [])]));
+  let h = section(allLabel, collect(countAll));
+  if (L > 1) h += section(phraseLabel, collect(countPhrase));   // phrase is only meaningful for 2+ symbols
   res.innerHTML = h;
   res.querySelectorAll(".chip").forEach(c => c.onclick = () => loadMsg(+c.dataset.n));
 }
@@ -602,6 +625,7 @@ $("m-ans").onclick = () => {
 };
 
 $("d-filter").oninput = renderDict;
+$("d-filter-clear").onclick = () => { $("d-filter").value = ""; renderDict(); $("d-filter").focus(); };
 $("d-add").onclick = () => {
   const s = parseInt($("d-sym").value, 10);
   if (isNaN(s)){ alert("SYMBOL MUST BE AN INTEGER"); return; }
